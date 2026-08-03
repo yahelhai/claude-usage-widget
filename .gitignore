@@ -1,0 +1,10 @@
+# Local planning document — not part of the project
+PLAN.md
+magical-wandering-treasure.md
+
+# Build output
+build/
+*.app
+
+# macOS
+.DS_Store
