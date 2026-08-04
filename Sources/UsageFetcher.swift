@@ -96,15 +96,18 @@ final class UsageFetcher {
 
     // MARK: - Defensive mapping
 
-    /// Map the response to the widget's rows. Tolerates a bare array or a wrapper object, matches
-    /// kinds loosely, and orders the rows to match the reference panel (5-hour, weekly, per-model).
+    /// Map the response to the widget's rows. The live payload is an object with a `limits` array of
+    /// `{ kind, group, percent, resets_at, scope }`; we route by kind/group/scope and order the rows
+    /// to match the reference panel (5-hour, weekly all-models, weekly per-model). Tolerates a bare
+    /// array or other wrapper keys defensively in case the shape shifts.
     static func mapRows(_ data: Data) -> [UsageRow] {
         guard let root = try? JSONSerialization.jsonObject(with: data) else { return [] }
         let list: [[String: Any]]
         if let arr = root as? [[String: Any]] {
             list = arr
         } else if let obj = root as? [String: Any] {
-            list = (obj["utilizations"] ?? obj["rows"] ?? obj["data"]) as? [[String: Any]] ?? []
+            list = (obj["limits"] ?? obj["utilizations"] ?? obj["rows"] ?? obj["data"])
+                as? [[String: Any]] ?? []
         } else {
             list = []
         }
@@ -112,26 +115,27 @@ final class UsageFetcher {
         var ranked: [(rank: Int, row: UsageRow)] = []
         for e in list {
             let kind = ((e["kind"] as? String) ?? (e["type"] as? String) ?? "").lowercased()
+            let group = (e["group"] as? String ?? "").lowercased()
             guard let percent = clampPct(e["percent"] ?? e["utilization"]) else { continue }
             let resetsAt = toEpoch(e["resets_at"] ?? e["resetsAt"])
 
-            if kind.contains("hour") {
+            if kind.contains("session") || group == "session" || kind.contains("hour") {
                 ranked.append((0, UsageRow(title: "5-hour limit", percent: percent, resetsAt: resetsAt)))
-            } else if kind.contains("scoped") {
-                ranked.append((2, UsageRow(title: "Weekly · \(scopeName(e))", percent: percent, resetsAt: resetsAt)))
-            } else if kind.contains("week") {
+            } else if let name = scopeDisplayName(e) {   // any entry carrying a model scope
+                ranked.append((2, UsageRow(title: "Weekly · \(name)", percent: percent, resetsAt: resetsAt)))
+            } else if kind.contains("week") || group == "weekly" {
                 ranked.append((1, UsageRow(title: "Weekly · all models", percent: percent, resetsAt: resetsAt)))
             }
         }
         return ranked.sorted { $0.rank < $1.rank }.map(\.row)
     }
 
-    private static func scopeName(_ e: [String: Any]) -> String {
-        if let scope = e["scope"] as? [String: Any] {
-            if let model = scope["model"] as? [String: Any], let n = model["display_name"] as? String { return n }
-            if let n = scope["display_name"] as? String { return n }
-        }
-        return "model"
+    /// The display name of an entry's model scope, or nil when the entry isn't model-scoped.
+    private static func scopeDisplayName(_ e: [String: Any]) -> String? {
+        guard let scope = e["scope"] as? [String: Any] else { return nil }
+        if let model = scope["model"] as? [String: Any], let n = model["display_name"] as? String { return n }
+        if let n = scope["display_name"] as? String { return n }
+        return nil
     }
 
     private static func clampPct(_ v: Any?) -> Int? {
@@ -147,11 +151,14 @@ final class UsageFetcher {
         if let n = v as? Double { return n > 1e12 ? n / 1000 : n }
         if let n = v as? Int { let d = Double(n); return d > 1e12 ? d / 1000 : d }
         if let s = v as? String {
+            // The API sends microsecond precision ("...00.609406+00:00") which ISO8601DateFormatter
+            // won't parse. Strip fractional seconds and parse at whole-second precision.
+            let cleaned = s.replacingOccurrences(of: #"\.\d+"#, with: "", options: .regularExpression)
+            let iso = ISO8601DateFormatter()
+            if let d = iso.date(from: cleaned) { return d.timeIntervalSince1970 }
             let withFraction = ISO8601DateFormatter()
             withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             if let d = withFraction.date(from: s) { return d.timeIntervalSince1970 }
-            let plain = ISO8601DateFormatter()
-            if let d = plain.date(from: s) { return d.timeIntervalSince1970 }
         }
         return nil
     }
