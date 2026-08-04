@@ -1,17 +1,10 @@
 import AppKit
-import Darwin
 
-// Standalone check for the visibility logic, plus a mock feeder for the widget bridge.
+// Standalone check for the visibility logic, before any UI exists.
+// Run it, then drag windows over Claude / minimise it / switch Spaces and watch the verdict.
 //
-//   probe [seconds]      watch the visibility verdict change (default 5s)
-//   probe --dump         print the current window stack once
-//   probe feed           push fixed mock rows to the widget and hold the connection open
-//   probe feed --animate push mock rows that climb over time (for testing the bar states)
-
-if CommandLine.arguments.contains("feed") {
-    runFeeder(animate: CommandLine.arguments.contains("--animate"))
-    exit(0)
-}
+//   probe [seconds]   watch the verdict change (default 5s)
+//   probe --dump      print the current window stack once
 
 if CommandLine.arguments.contains("--dump") {
     let pids = Set(
@@ -56,64 +49,4 @@ while Date() < deadline {
         last = line
     }
     usleep(400_000)
-}
-
-// MARK: - Mock feeder
-
-/// Connects to the widget's loopback bridge and pushes fake rows shaped exactly like the real
-/// exporter's output, so the UI and behaviour can be verified before Claude is ever touched.
-func runFeeder(animate: Bool) {
-    let fd = socket(AF_INET, SOCK_STREAM, 0)
-    guard fd >= 0 else { print("feed: socket() failed"); return }
-
-    var addr = sockaddr_in()
-    addr.sin_family = sa_family_t(AF_INET)
-    addr.sin_port = BridgeProtocol.port.bigEndian
-    addr.sin_addr.s_addr = inet_addr(BridgeProtocol.host)
-
-    let connected = withUnsafePointer(to: &addr) {
-        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-            connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-        }
-    }
-    guard connected == 0 else {
-        print("feed: connect failed — is the widget running?")
-        close(fd)
-        return
-    }
-
-    func send(_ s: String) {
-        var line = s + "\n"
-        _ = line.withUTF8 { write(fd, $0.baseAddress, $0.count) }
-    }
-    send(BridgeProtocol.magic)
-
-    // Next Monday 5:00 AM, local time, matching the reference screenshot.
-    var comps = DateComponents(); comps.weekday = 2; comps.hour = 5
-    let mondayReset = Calendar.current
-        .nextDate(after: Date(), matching: comps, matchingPolicy: .nextTime)
-        .map { Int($0.timeIntervalSince1970) } ?? Int(Date().timeIntervalSince1970)
-
-    var p5 = 0, pWeek = 7, pFable = 8
-    print("feed: connected, pushing rows (Ctrl-C to stop)")
-    while true {
-        let now = Int(Date().timeIntervalSince1970)
-        send("""
-        {"v":1,"updatedAt":\(now),"rows":[\
-        {"title":"5-hour limit","percent":\(p5),"resetsAt":null},\
-        {"title":"Weekly · all models","percent":\(pWeek),"resetsAt":\(mondayReset)},\
-        {"title":"Weekly · Fable","percent":\(pFable),"resetsAt":\(mondayReset)}]}
-        """)
-        print("feed: 5h=\(p5)% week=\(pWeek)% fable=\(pFable)%")
-        fflush(stdout)
-
-        if animate {
-            p5 = (p5 + 7) % 101
-            pWeek = min(100, pWeek + 3)
-            pFable = min(100, pFable + 5)
-            usleep(1_500_000)
-        } else {
-            sleep(5)   // hold the connection open and keep the data fresh
-        }
-    }
 }

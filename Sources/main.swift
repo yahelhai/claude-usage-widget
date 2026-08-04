@@ -1,11 +1,10 @@
 import AppKit
 
-/// Ties the pieces together: the loopback bridge feeds rows in, the visibility engine decides when
-/// the panel is on screen, and the panel draws. No networking happens here — the widget only
-/// listens; the exporter inside Claude does the fetching.
+/// Ties the pieces together: the fetcher reads Claude Code's token and pulls usage, the visibility
+/// engine decides when the panel is on screen, and the panel draws.
 final class AppController: NSObject, NSApplicationDelegate {
     let panel = WidgetPanel()
-    let bridge = UsageBridge()
+    let fetcher = UsageFetcher()
 
     private var pollTimer: Timer?
     private var staleTimer: Timer?
@@ -13,28 +12,34 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var lastUpdate: Date?
     private var announcedWindowID = false
 
-    /// Testing aid: WIDGET_ALWAYS_SHOW=1 bypasses the visibility gate so the panel can be inspected
-    /// on its own, without Claude on screen.
-    private let alwaysShow = ProcessInfo.processInfo.environment["WIDGET_ALWAYS_SHOW"] == "1"
+    /// Testing aids: WIDGET_ALWAYS_SHOW=1 bypasses the visibility gate; WIDGET_MOCK=1 feeds fixed
+    /// rows instead of reading the Keychain / calling the API.
+    private let env = ProcessInfo.processInfo.environment
+    private var alwaysShow: Bool { env["WIDGET_ALWAYS_SHOW"] == "1" }
+    private var mock: Bool { env["WIDGET_MOCK"] == "1" }
 
     func applicationDidFinishLaunching(_ note: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        panel.rowsView.placeholder = "Waiting for Claude…\nRun the usage patch to see your quota."
+        panel.rowsView.placeholder = "Waiting for usage…\nSign in to Claude Code to populate this."
         panel.rowsView.menu = buildMenu()
 
-        bridge.onData = { [weak self] rows, updatedAt in self?.apply(rows: rows, updatedAt: updatedAt) }
-        bridge.onDisconnect = { [weak self] in self?.panel.rowsView.stale = true }
-        bridge.start()
+        if mock {
+            apply(rows: Self.mockRows())
+        } else {
+            fetcher.onData = { [weak self] rows in self?.apply(rows: rows) }
+            fetcher.onStale = { [weak self] in self?.panel.rowsView.stale = true }
+            fetcher.start()
+            staleTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+                guard let self, let last = self.lastUpdate else { return }
+                if Date().timeIntervalSince(last) > 600 { self.panel.rowsView.stale = true }
+            }
+        }
 
         startVisibilityPolling()
-        staleTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            guard let self, let last = self.lastUpdate else { return }
-            if Date().timeIntervalSince(last) > 600 { self.panel.rowsView.stale = true }
-        }
     }
 
-    private func apply(rows: [UsageRow], updatedAt: TimeInterval) {
+    private func apply(rows: [UsageRow]) {
         panel.rowsView.rows = rows.map {
             DisplayRow(title: $0.title, percent: $0.percent,
                        resetsAt: $0.resetsAt.map(Date.init(timeIntervalSince1970:)))
@@ -91,11 +96,25 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func refresh() {
-        panel.rowsView.needsDisplay = true
+        if !mock { fetcher.pollNow() }
         updateVisibility()
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
+
+    // MARK: Mock data (WIDGET_MOCK=1)
+
+    private static func mockRows() -> [UsageRow] {
+        var comps = DateComponents(); comps.weekday = 2; comps.hour = 5   // next Monday 5:00 AM
+        let reset = Calendar.current
+            .nextDate(after: Date(), matching: comps, matchingPolicy: .nextTime)?
+            .timeIntervalSince1970
+        return [
+            UsageRow(title: "5-hour limit", percent: 0, resetsAt: nil),
+            UsageRow(title: "Weekly · all models", percent: 7, resetsAt: reset),
+            UsageRow(title: "Weekly · Fable", percent: 8, resetsAt: reset),
+        ]
+    }
 }
 
 let app = NSApplication.shared

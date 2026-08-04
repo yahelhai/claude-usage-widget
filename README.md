@@ -10,16 +10,22 @@ active app. When Claude is fully covered, minimised, or on another Space, the wi
 
 ## How it works
 
-Two pieces talk over a loopback socket on `127.0.0.1`:
+A single native Swift agent (`LSUIElement`, no Dock icon):
 
-- **`ClaudeUsageWidget.app`** — a native Swift menu-less agent (`LSUIElement`). It owns the socket,
-  decides when to show itself (`ClaudeVisibility`), and draws the rows (`WidgetPanel`).
-- **`usage-exporter.js`** — injected into Claude Desktop by a patch. It fetches
-  `GET /api/oauth/usage` using a token the app already holds *in-process*, and pushes only
-  percentages and reset times to the widget.
+- **`UsageFetcher`** — every 60s it reads the OAuth token **Claude Code already stores in the macOS
+  Keychain** (item `Claude Code-credentials`) and calls `GET /api/oauth/usage` itself, then maps the
+  response to the three rows.
+- **`ClaudeVisibility`** — decides when the widget is on screen, using window-occlusion metadata
+  only (no Screen Recording permission).
+- **`WidgetPanel`** — the floating panel that draws the rows.
 
-**No secrets leave Claude.** The token never crosses the socket, and nothing is written to disk
-(only the widget's window position, in `UserDefaults`).
+The token is read by spawning the stable, Apple-signed `/usr/bin/security` binary, so the one-time
+Keychain **"Always Allow"** grant survives app rebuilds. The token is used **read-only** — it is
+never refreshed (so Claude Code's refresh token is never rotated) and never written anywhere. The
+only thing persisted to disk is the widget's window position, in `UserDefaults`.
+
+If the access token is expired, the widget shows its last values dimmed as **stale** until Claude
+Code refreshes the token during normal use.
 
 ## Build & run
 
@@ -31,23 +37,28 @@ Requires the Swift toolchain from the Command Line Tools (no Xcode, no SwiftPM).
 ./install.sh --login       # also start at login via a LaunchAgent
 ```
 
-Try the UI without touching Claude, using the mock feeder:
+On first launch, macOS asks to allow `security` to read the Claude Code Keychain item — click
+**Always Allow**. Try the UI without any Keychain/network using mock data:
 
 ```sh
-open build/ClaudeUsageWidget.app     # or run the binary with WIDGET_ALWAYS_SHOW=1 to force it visible
-./build/probe feed                   # pushes fixed mock rows
-./build/probe feed --animate         # rows that climb, to see the bar colour states
+WIDGET_MOCK=1 WIDGET_ALWAYS_SHOW=1 ./build/ClaudeUsageWidget.app/Contents/MacOS/ClaudeUsageWidget
 ```
 
-## Attribution
+`build/probe` is a standalone tool for debugging the visibility engine (`probe --dump`, or
+`probe [seconds]` to watch the verdict change).
 
-The injection patch is derived from
+## Optional fallback: the in-process exporter (`patch/`)
+
+`patch/` contains an earlier, **superseded** approach: a JavaScript exporter injected into Claude
+Desktop's main process by `patch/patch.sh`, which pushes usage to the widget over a loopback socket.
+It is kept as a reference/fallback for setups where reading the Keychain isn't desirable. The
+default build does not use it, and patching Claude Desktop invalidates Anthropic's code signature
+and is wiped by Claude updates.
+
+The patch mechanics are derived from
 [`toboly/claude-desktop-rtl-patch-mac`](https://github.com/toboly/claude-desktop-rtl-patch-mac),
-itself based on the original patch by **shraga100**. Their license is preserved. This project adds
-a separate usage exporter and the native widget; it is **not** a fork of that repository.
-
-Patching Claude Desktop replaces files inside `/Applications/Claude.app` and invalidates
-Anthropic's code signature. A Claude update will wipe the patch — re-run it afterwards.
+itself based on the original patch by **shraga100**. Their license is preserved. This project is
+**not** a fork of that repository.
 
 ## License
 

@@ -7,8 +7,8 @@ mkdir -p build
 echo "· building widget"
 swiftc -O Sources/*.swift -o build/ClaudeUsageWidget
 
-echo "· building probe/feeder tool"
-swiftc -O Tools/main.swift Sources/ClaudeVisibility.swift Sources/BridgeProtocol.swift -o build/probe
+echo "· building probe tool"
+swiftc -O Tools/main.swift Sources/ClaudeVisibility.swift -o build/probe
 
 echo "· assembling app bundle"
 APP="build/ClaudeUsageWidget.app"
