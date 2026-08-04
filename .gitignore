@@ -8,3 +8,6 @@ build/
 
 # macOS
 .DS_Store
+
+# stray asar extract
+package.json
