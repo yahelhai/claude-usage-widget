@@ -7,7 +7,9 @@ final class AppController: NSObject, NSApplicationDelegate {
     let fetcher = UsageFetcher()
 
     private var pollTimer: Timer?
-    private var lastVisible = false
+    /// Optional so the first evaluation always applies — otherwise launching while Claude is
+    /// already hidden would leave the fetcher polling for a panel nobody can see.
+    private var lastVisible: Bool?
     private var announcedWindowID = false
 
     /// Testing aids: WIDGET_ALWAYS_SHOW=1 bypasses the visibility gate; WIDGET_MOCK=1 feeds fixed
@@ -23,6 +25,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         case "signedOut": return .signedOut
         case "denied": return .denied
         case "unreachable": return .unreachable("offline")
+        case "rateLimited": return .rateLimited
         default: return nil
         }
     }
@@ -35,7 +38,10 @@ final class AppController: NSObject, NSApplicationDelegate {
         panel.rowsView.onRefresh = { [weak self] in self?.refresh() }
 
         if let forcedStatus {
-            if case .unreachable = forcedStatus { apply(rows: Self.mockRows()) }
+            switch forcedStatus {
+            case .unreachable, .rateLimited: apply(rows: Self.mockRows())
+            default: break
+            }
             apply(status: forcedStatus)
         } else if mock {
             apply(rows: Self.mockRows())
@@ -103,7 +109,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         switch status {
         case .signedOut, .denied:
             panel.fit(rowCount: 2)
-        case .ok, .unreachable:
+        case .ok, .unreachable, .rateLimited:
             panel.fit(rowCount: max(panel.rowsView.rows.count, 1))
         }
     }
@@ -132,6 +138,9 @@ final class AppController: NSObject, NSApplicationDelegate {
         let visible = alwaysShow || ClaudeVisibility.isVisible()
         guard visible != lastVisible else { return }
         lastVisible = visible
+        // A hidden panel has nothing to refresh, and every skipped poll is one the usage
+        // endpoint's rate limiter doesn't count against us.
+        if !mock && forcedStatus == nil { fetcher.setActive(visible) }
         if visible {
             panel.orderFrontRegardless()
             if !announcedWindowID {          // lets a test harness capture just this window
@@ -157,7 +166,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func refresh() {
-        if !mock { fetcher.pollNow() }
+        if !mock { fetcher.pollNow(manual: true) }
         updateVisibility()
     }
 

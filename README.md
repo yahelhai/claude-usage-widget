@@ -30,10 +30,18 @@ The widget names what is actually wrong rather than dimming everything into one 
 
 | State | What you see | Poll rate |
 |---|---|---|
-| Normal | The three rows, plus `Updated HH:MM` in the footer | 60s |
+| Normal | The three rows, plus `Updated HH:MM` in the footer | 5 min |
 | Signed out | `Claude Code is signed out` and the command that fixes it — no stale numbers, which could be weeks old | 10s, Keychain only (no network) |
-| Can't reach Anthropic | Last known rows dimmed, footer explains why | 15s → 30s → 60s backoff |
+| Rate limited | Last known rows dimmed, footer says it is backing off | 5 → 10 → 15 min, or `Retry-After` |
+| Can't reach Anthropic | Last known rows dimmed, footer explains why | 30s → 60s → 3 min backoff |
 | Keychain denied | How to restore access | 10s |
+
+**Polling follows visibility.** While the panel is hidden — Claude covered, minimised, or on another
+Space — nothing is fetched at all.
+
+`/api/oauth/usage` rate-limits, and these numbers move slowly, so the healthy interval is minutes,
+not seconds. The **↻** control forces a poll but is ignored within 15s of the previous one, so it
+can't be used to hammer a throttled endpoint.
 
 **It recovers on its own.** While signed out it re-checks the Keychain every 10 seconds — a local,
 free check — so the moment you run `claude auth login`, the widget repopulates without being
@@ -65,7 +73,7 @@ Environment variables, all read at launch:
 |---|---|
 | `WIDGET_MOCK=1` | Fixed rows instead of reading the Keychain or calling the API |
 | `WIDGET_ALWAYS_SHOW=1` | Bypass the visibility gate |
-| `WIDGET_FORCE_STATUS=` | `signedOut`, `denied`, or `unreachable` — pins a failure state so its message can be checked without signing out or dropping the network |
+| `WIDGET_FORCE_STATUS=` | `signedOut`, `denied`, `rateLimited`, or `unreachable` — pins a failure state so its message can be checked without signing out or dropping the network |
 | `WIDGET_SELF_TEST=1` | Clicks the refresh control and a row in the real window, prints whether each reached the handler, then exits |
 
 ```sh

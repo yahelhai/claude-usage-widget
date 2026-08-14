@@ -24,7 +24,8 @@ final class UsageFetcher {
     enum Status: Equatable, Error {
         case ok
         case signedOut              // token empty, missing, or expired → retrying cannot help
-        case unreachable(String)    // transport error or non-200 → retrying may help
+        case rateLimited            // HTTP 429 → we asked too often; back off hard
+        case unreachable(String)    // transport error or other non-200 → retrying may help
         case denied                 // `security` refused: the Keychain prompt was denied
     }
 
@@ -40,15 +41,23 @@ final class UsageFetcher {
     private let keychainService = "Claude Code-credentials"
     private let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private var timer: Timer?
-    private var unreachableAttempts = 0
+    private var failureStreak = 0
     private var inFlight = false
+    private var active = true
+    private var lastNetworkPoll: Date?
+    private var retryAfter: TimeInterval?
     private let session = URLSession(configuration: .ephemeral)
 
-    // Poll cadence per state. Signed out is polled briskly because the check is local and free:
-    // the moment the user runs `claude auth login`, the widget recovers on its own.
-    private static let okInterval: TimeInterval = 60
+    /// Poll cadence per state. The usage endpoint rate-limits, and the numbers move slowly, so the
+    /// healthy interval is minutes rather than seconds. Signed out is the exception: that check is
+    /// local and free, so it runs briskly and the widget recovers seconds after a sign-in.
+    private static let okInterval: TimeInterval = 300
     private static let signedOutInterval: TimeInterval = 10
-    private static let unreachableBackoff: [TimeInterval] = [15, 30, 60]
+    private static let unreachableBackoff: [TimeInterval] = [30, 60, 180]
+    private static let rateLimitBackoff: [TimeInterval] = [300, 600, 900]
+    /// Ignore a manual refresh this soon after a network poll — the button must not become a way
+    /// to hammer a rate-limited endpoint.
+    private static let manualRefreshFloor: TimeInterval = 15
 
     func start() {
         pollNow()
@@ -59,12 +68,31 @@ final class UsageFetcher {
         timer = nil
     }
 
-    func pollNow() {
+    /// Polling follows the widget's visibility: there is nothing to refresh for a hidden panel, and
+    /// every skipped call is one the rate limiter doesn't count. On becoming visible we refresh
+    /// only if the data has aged past a healthy interval.
+    func setActive(_ value: Bool) {
+        guard value != active else { return }
+        active = value
+        if value {
+            let age = lastNetworkPoll.map { Date().timeIntervalSince($0) } ?? .infinity
+            if age >= Self.okInterval { pollNow() } else { scheduleNext() }
+        } else {
+            timer?.invalidate()
+            timer = nil
+        }
+    }
+
+    /// `manual` marks a user-initiated poll, which bypasses the schedule but not the rate-limit floor.
+    func pollNow(manual: Bool = false) {
         guard !inFlight else { return }
+        if manual, let last = lastNetworkPoll,
+           Date().timeIntervalSince(last) < Self.manualRefreshFloor { return }
 
         switch readAccessToken() {
         case .success(let token):
             setRefreshing(true)
+            lastNetworkPoll = Date()
             fetch(token: token)
         case .failure(let failure):
             // No network call: there is nothing to authenticate with.
@@ -76,10 +104,11 @@ final class UsageFetcher {
     // MARK: - Status plumbing
 
     private func update(status newStatus: Status) {
-        if case .unreachable = newStatus {
-            unreachableAttempts += 1
-        } else {
-            unreachableAttempts = 0
+        switch newStatus {
+        case .unreachable, .rateLimited:
+            failureStreak += 1
+        case .ok, .signedOut, .denied:
+            failureStreak = 0
         }
         guard newStatus != status else { return }
         status = newStatus
@@ -94,19 +123,28 @@ final class UsageFetcher {
     /// Reschedules the timer for the current state. Called after every poll, so a state change
     /// takes effect on the next tick rather than waiting out the old interval.
     private func scheduleNext() {
-        let delay: TimeInterval
+        guard active else { return }
+
+        func backoff(_ table: [TimeInterval]) -> TimeInterval {
+            table[max(0, min(failureStreak, table.count) - 1)]
+        }
+
+        var delay: TimeInterval
         switch status {
         case .ok:
             delay = Self.okInterval
         case .signedOut, .denied:
             delay = Self.signedOutInterval
         case .unreachable:
-            let i = min(unreachableAttempts, Self.unreachableBackoff.count) - 1
-            delay = Self.unreachableBackoff[max(0, i)]
+            delay = backoff(Self.unreachableBackoff)
+        case .rateLimited:
+            // Honour Retry-After when the server sends a usable one; it sends 0 otherwise.
+            delay = max(retryAfter ?? 0, backoff(Self.rateLimitBackoff))
         }
+        retryAfter = nil
 
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.active else { return }
             self.timer?.invalidate()
             self.timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
                 self?.pollNow()
@@ -178,6 +216,15 @@ final class UsageFetcher {
             // the session is gone, so it is a sign-out, not a transport problem.
             guard http.statusCode != 401, http.statusCode != 403 else {
                 self.update(status: .signedOut)
+                return
+            }
+            // 429 is not "can't reach Anthropic" — we reached it and were told to slow down.
+            guard http.statusCode != 429 else {
+                if let header = http.value(forHTTPHeaderField: "Retry-After"),
+                   let seconds = TimeInterval(header), seconds > 0 {
+                    self.retryAfter = seconds
+                }
+                self.update(status: .rateLimited)
                 return
             }
             guard http.statusCode == 200 else {

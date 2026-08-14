@@ -45,7 +45,7 @@ final class RowsView: NSView {
         case .denied:
             drawMessage("Keychain access denied", command: nil,
                         hint: "Allow access to \(Self.keychainLabel), then refresh")
-        case .ok, .unreachable:
+        case .ok, .unreachable, .rateLimited:
             drawRowsOrPlaceholder()
         }
         drawFooter()
@@ -54,12 +54,22 @@ final class RowsView: NSView {
 
     private func drawRowsOrPlaceholder() {
         guard !rows.isEmpty else {
-            if let placeholder { drawCentered(placeholder, alpha: 0.5) }
+            // Nothing cached yet. Only claim to be checking when we actually are — the footer
+            // carries the reason in every other case, so this line stays neutral.
+            let text: String
+            if case .ok = status { text = placeholder ?? "" } else { text = "No data yet" }
+            if !text.isEmpty { drawCentered(text, alpha: 0.5) }
             return
         }
 
-        // Keep the last known numbers on screen while unreachable, but dimmed — the footer says why.
-        let dim: CGFloat = { if case .unreachable = status { return 0.4 }; return 1.0 }()
+        // Keep the last known numbers on screen while we can't refresh, but dimmed — the footer
+        // says why. They are still the truth as of the timestamp, just not current.
+        let dim: CGFloat = {
+            switch status {
+            case .unreachable, .rateLimited: return 0.4
+            default: return 1.0
+            }
+        }()
         let pad = Self.padding
         var top = pad
 
@@ -133,6 +143,9 @@ final class RowsView: NSView {
             text = lastUpdate.map { "Updated " + Self.clockFormatter.string(from: $0) } ?? ""
         case .unreachable(let reason):
             text = "Can't reach Anthropic · \(reason)"
+        case .rateLimited:
+            let stamp = lastUpdate.map { " · " + Self.clockFormatter.string(from: $0) } ?? ""
+            text = "Rate limited, backing off\(stamp)"
         case .signedOut, .denied:
             text = ""
         }
