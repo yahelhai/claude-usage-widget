@@ -24,8 +24,25 @@ Keychain **"Always Allow"** grant survives app rebuilds. The token is used **rea
 never refreshed (so Claude Code's refresh token is never rotated) and never written anywhere. The
 only thing persisted to disk is the widget's window position, in `UserDefaults`.
 
-If the access token is expired, the widget shows its last values dimmed as **stale** until Claude
-Code refreshes the token during normal use.
+## States
+
+The widget names what is actually wrong rather than dimming everything into one "stale" look:
+
+| State | What you see | Poll rate |
+|---|---|---|
+| Normal | The three rows, plus `Updated HH:MM` in the footer | 60s |
+| Signed out | `Claude Code is signed out` and the command that fixes it — no stale numbers, which could be weeks old | 10s, Keychain only (no network) |
+| Can't reach Anthropic | Last known rows dimmed, footer explains why | 15s → 30s → 60s backoff |
+| Keychain denied | How to restore access | 10s |
+
+**It recovers on its own.** While signed out it re-checks the Keychain every 10 seconds — a local,
+free check — so the moment you run `claude auth login`, the widget repopulates without being
+touched. The **↻** control in the bottom-right forces a poll immediately; it is mainly useful for
+transient network failures, since no button can conjure a token that isn't there.
+
+Because Claude Desktop maintains its own session separately from the Claude Code CLI credential
+this reads, the widget can go stale after the CLI's access token expires and stay that way until
+you next use the `claude` CLI, which refreshes it.
 
 ## Build & run
 
@@ -38,7 +55,18 @@ Requires the Swift toolchain from the Command Line Tools (no Xcode, no SwiftPM).
 ```
 
 On first launch, macOS asks to allow `security` to read the Claude Code Keychain item — click
-**Always Allow**. Try the UI without any Keychain/network using mock data:
+**Always Allow**.
+
+### Testing aids
+
+Environment variables, all read at launch:
+
+| Variable | Effect |
+|---|---|
+| `WIDGET_MOCK=1` | Fixed rows instead of reading the Keychain or calling the API |
+| `WIDGET_ALWAYS_SHOW=1` | Bypass the visibility gate |
+| `WIDGET_FORCE_STATUS=` | `signedOut`, `denied`, or `unreachable` — pins a failure state so its message can be checked without signing out or dropping the network |
+| `WIDGET_SELF_TEST=1` | Clicks the refresh control and a row in the real window, prints whether each reached the handler, then exits |
 
 ```sh
 WIDGET_MOCK=1 WIDGET_ALWAYS_SHOW=1 ./build/ClaudeUsageWidget.app/Contents/MacOS/ClaudeUsageWidget
