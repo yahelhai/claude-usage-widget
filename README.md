@@ -65,6 +65,10 @@ Requires the Swift toolchain from the Command Line Tools (no Xcode, no SwiftPM).
 On first launch, macOS asks to allow `security` to read the Claude Code Keychain item — click
 **Always Allow**.
 
+Only one instance runs at a time: launching again exits immediately rather than adding a second
+panel. To restart the LaunchAgent copy, use
+`launchctl kickstart -k gui/$(id -u)/ai.yahelh.claude-usage-widget`.
+
 ### Testing aids
 
 Environment variables, all read at launch:

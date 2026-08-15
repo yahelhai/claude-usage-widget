@@ -187,6 +187,22 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 }
 
+// Refuse to run twice. Without this, a LaunchAgent copy and a hand-launched copy happily coexist,
+// each drawing its own panel and — worse — each polling the usage endpoint, doubling the request
+// rate against a limit that is already tight. Launching again is treated as a no-op, not a restart:
+// the instance already on screen is the one the user is looking at.
+if let bundleID = Bundle.main.bundleIdentifier {
+    let others = NSRunningApplication
+        .runningApplications(withBundleIdentifier: bundleID)
+        .filter { $0 != .current }
+    if let existing = others.first {
+        FileHandle.standardError.write(Data(
+            "ClaudeUsageWidget is already running (pid \(existing.processIdentifier)); exiting.\n".utf8
+        ))
+        exit(0)
+    }
+}
+
 let app = NSApplication.shared
 let controller = AppController()
 app.delegate = controller
