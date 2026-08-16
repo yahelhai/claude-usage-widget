@@ -32,6 +32,7 @@ The widget names what is actually wrong rather than dimming everything into one 
 |---|---|---|
 | Normal | The three rows, plus `Updated HH:MM` in the footer | 5 min |
 | Signed out | `Claude Code is signed out` and the command that fixes it — no stale numbers, which could be weeks old | 10s, Keychain only (no network) |
+| Token expired | Normally invisible: renewed automatically. Only shown if renewal fails | 65s |
 | Rate limited | Last known rows dimmed, footer says it is backing off | 5 → 10 → 15 min, or `Retry-After` |
 | Can't reach Anthropic | Last known rows dimmed, footer explains why | 30s → 60s → 3 min backoff |
 | Keychain denied | How to restore access | 10s |
@@ -48,9 +49,20 @@ free check — so the moment you run `claude auth login`, the widget repopulates
 touched. The **↻** control in the bottom-right forces a poll immediately; it is mainly useful for
 transient network failures, since no button can conjure a token that isn't there.
 
-Because Claude Desktop maintains its own session separately from the Claude Code CLI credential
-this reads, the widget can go stale after the CLI's access token expires and stay that way until
-you next use the `claude` CLI, which refreshes it.
+### Token renewal
+
+Claude Code's access token lasts hours; the session behind it lasts weeks. Claude Desktop keeps its
+own session and never renews the CLI's copy, so on a desktop-only machine that access token simply
+goes stale and the widget would have nothing to call with.
+
+An expired access token is therefore **not** treated as a sign-out. Claude Code renews and re-stores
+its own token as a side effect of any authenticated CLI command, so the widget runs a cheap
+read-only one (`claude mcp list`) and reads the Keychain again. Renewal happens entirely inside
+Claude Code — the widget never rotates anything itself, so it cannot leave the CLI holding a token
+it no longer recognises. Attempts are throttled to once a minute.
+
+The CLI is located by absolute path rather than through a shell: a LaunchAgent starts with almost
+no `PATH`, and a login shell does not read the `~/.zshrc` where the install puts it.
 
 ## Build & run
 

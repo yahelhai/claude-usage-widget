@@ -23,7 +23,8 @@ final class UsageFetcher {
     /// Conforms to `Error` only so `readAccessToken()` can return it as a `Result` failure.
     enum Status: Equatable, Error {
         case ok
-        case signedOut              // token empty, missing, or expired → retrying cannot help
+        case signedOut              // no stored session at all → only signing in helps
+        case tokenExpired           // access token stale, session intact → recoverable
         case rateLimited            // HTTP 429 → we asked too often; back off hard
         case unreachable(String)    // transport error or other non-200 → retrying may help
         case denied                 // `security` refused: the Keychain prompt was denied
@@ -45,6 +46,7 @@ final class UsageFetcher {
     private var inFlight = false
     private var active = true
     private var lastNetworkPoll: Date?
+    private var lastRenewAttempt: Date?
     private var retryAfter: TimeInterval?
     private let session = URLSession(configuration: .ephemeral)
 
@@ -58,6 +60,10 @@ final class UsageFetcher {
     /// Ignore a manual refresh this soon after a network poll — the button must not become a way
     /// to hammer a rate-limited endpoint.
     private static let manualRefreshFloor: TimeInterval = 15
+    /// Minimum gap between renewal attempts. A fresh token lasts hours, so needing one twice in a
+    /// minute means renewal isn't working — and spawning a process every 10s would be the worst
+    /// possible response to that.
+    private static let renewCooldown: TimeInterval = 60
 
     func start() {
         pollNow()
@@ -89,15 +95,21 @@ final class UsageFetcher {
         if manual, let last = lastNetworkPoll,
            Date().timeIntervalSince(last) < Self.manualRefreshFloor { return }
 
-        switch readAccessToken() {
-        case .success(let token):
-            setRefreshing(true)
-            lastNetworkPoll = Date()
-            fetch(token: token)
-        case .failure(let failure):
-            // No network call: there is nothing to authenticate with.
-            update(status: failure)
-            scheduleNext()
+        // Resolving the token can spawn a subprocess and wait on it, so it must never run on the
+        // main thread — a frozen panel would be a worse bug than the one this fixes.
+        setRefreshing(true)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            switch self.resolveToken() {
+            case .success(let token):
+                self.lastNetworkPoll = Date()
+                self.fetch(token: token)          // clears the in-flight flag in its own defer
+            case .failure(let failure):
+                // No network call: there is nothing to authenticate with.
+                self.setRefreshing(false)
+                self.update(status: failure)
+                self.scheduleNext()
+            }
         }
     }
 
@@ -107,7 +119,7 @@ final class UsageFetcher {
         switch newStatus {
         case .unreachable, .rateLimited:
             failureStreak += 1
-        case .ok, .signedOut, .denied:
+        case .ok, .signedOut, .tokenExpired, .denied:
             failureStreak = 0
         }
         guard newStatus != status else { return }
@@ -135,6 +147,9 @@ final class UsageFetcher {
             delay = Self.okInterval
         case .signedOut, .denied:
             delay = Self.signedOutInterval
+        case .tokenExpired:
+            // Renewal is throttled, so retry just past the cooldown rather than every 10s.
+            delay = Self.renewCooldown + 5
         case .unreachable:
             delay = backoff(Self.unreachableBackoff)
         case .rateLimited:
@@ -154,8 +169,71 @@ final class UsageFetcher {
 
     // MARK: - Keychain (read-only)
 
-    /// Returns the access token, or the status explaining why there isn't one. The four failure
-    /// modes used to collapse into `nil`, which is what made the UI unable to say anything useful.
+    /// The access token, recovering from a stale one if Claude Code can renew it.
+    ///
+    /// Claude Code renews and re-stores its own token as a side effect of any authenticated CLI
+    /// command, so a cheap read-only one is enough to get a fresh token. Renewal therefore happens
+    /// entirely inside Claude Code, which is the point: the widget never rotates anything itself,
+    /// so it can't leave the CLI holding a token it no longer recognises.
+    private func resolveToken() -> Result<String, Status> {
+        let first = readAccessToken()
+        guard case .failure(.tokenExpired) = first else { return first }
+        guard askClaudeCodeToRenew() else { return .failure(.tokenExpired) }
+
+        // One retry. If Claude Code couldn't renew either, the session really is gone.
+        switch readAccessToken() {
+        case .success(let token): return .success(token)
+        case .failure(.tokenExpired): return .failure(.signedOut)
+        case .failure(let other): return .failure(other)
+        }
+    }
+
+    /// Whether the Claude Code CLI can be located, i.e. whether automatic renewal is possible here.
+    var canRenewToken: Bool { Self.claudeExecutable() != nil }
+
+    /// Runs a cheap, read-only Claude Code command purely for its renewal side effect. Throttled so
+    /// that a version where this stops working degrades into the honest "expired" message rather
+    /// than a process-spawning loop.
+    private func askClaudeCodeToRenew() -> Bool {
+        if let last = lastRenewAttempt,
+           Date().timeIntervalSince(last) < Self.renewCooldown { return false }
+        lastRenewAttempt = Date()
+
+        guard let claude = Self.claudeExecutable() else { return false }
+
+        let proc = Process()
+        proc.executableURL = claude
+        proc.arguments = ["mcp", "list"]
+        proc.standardOutput = Pipe()
+        proc.standardError = Pipe()
+        do { try proc.run() } catch { return false }
+        proc.waitUntilExit()
+        return proc.terminationStatus == 0
+    }
+
+    /// Locates the `claude` CLI by absolute path.
+    ///
+    /// Deliberately not `sh -lc "claude …"`: a LaunchAgent starts with essentially no `PATH`, and
+    /// a login shell doesn't read the `~/.zshrc` where the install actually puts it — verified, the
+    /// command is not found that way. An explicit search is both more reliable and faster.
+    private static func claudeExecutable() -> URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        var candidates = [
+            home.appendingPathComponent(".local/bin/claude"),
+            URL(fileURLWithPath: "/usr/local/bin/claude"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/claude"),
+        ]
+        // Whatever PATH we do have, in case of a non-standard install.
+        if let path = ProcessInfo.processInfo.environment["PATH"] {
+            candidates += path.split(separator: ":").map {
+                URL(fileURLWithPath: String($0)).appendingPathComponent("claude")
+            }
+        }
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+
+    /// Returns the access token, or the status explaining why there isn't one. The failure modes
+    /// used to collapse into `nil`, which is what made the UI unable to say anything useful.
     private func readAccessToken() -> Result<String, Status> {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
@@ -177,12 +255,14 @@ final class UsageFetcher {
               let token = oauth["accessToken"] as? String, !token.isEmpty
         else { return .failure(.signedOut) }
 
-        // Never refresh: if the access token has expired, skip the call and wait for Claude Code to
-        // refresh it during normal use. `expiresAt == 0` means "no live session", not "expired in
-        // 1970" — both land on .signedOut, which is the honest answer either way.
+        // A stale access token is NOT a sign-out. The stored session outlives it by weeks, and
+        // Claude Code mints a fresh one whenever it next makes an authenticated call. Telling the
+        // user to sign in again would be the wrong remedy for by far the common case, so the two
+        // are reported separately. Only `expiresAt == 0` means no live session was ever stored.
         if let expMs = oauth["expiresAt"] as? Double {
             let expSec = expMs > 1e12 ? expMs / 1000 : expMs
-            if expSec <= 0 || Date().timeIntervalSince1970 >= expSec { return .failure(.signedOut) }
+            if expSec <= 0 { return .failure(.signedOut) }
+            if Date().timeIntervalSince1970 >= expSec { return .failure(.tokenExpired) }
         }
         return .success(token)
     }

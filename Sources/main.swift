@@ -23,6 +23,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var forcedStatus: UsageFetcher.Status? {
         switch env["WIDGET_FORCE_STATUS"] {
         case "signedOut": return .signedOut
+        case "tokenExpired": return .tokenExpired
         case "denied": return .denied
         case "unreachable": return .unreachable("offline")
         case "rateLimited": return .rateLimited
@@ -88,6 +89,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             print("SELFTEST click_on_control_refreshes=\(click(control))")
             print("SELFTEST click_on_row_refreshes=\(click(NSPoint(x: 40, y: 30)))")
             print("SELFTEST accepts_first_mouse=\(view.acceptsFirstMouse(for: nil))")
+            print("SELFTEST claude_cli_found=\(fetcher.canRenewToken)")
             fflush(stdout)
             NSApp.terminate(nil)
         }
@@ -107,7 +109,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private func apply(status: UsageFetcher.Status) {
         panel.rowsView.status = status
         switch status {
-        case .signedOut, .denied:
+        case .signedOut, .tokenExpired, .denied:
             panel.fit(rowCount: 2)
         case .ok, .unreachable, .rateLimited:
             panel.fit(rowCount: max(panel.rowsView.rows.count, 1))
@@ -191,7 +193,10 @@ final class AppController: NSObject, NSApplicationDelegate {
 // each drawing its own panel and — worse — each polling the usage endpoint, doubling the request
 // rate against a limit that is already tight. Launching again is treated as a no-op, not a restart:
 // the instance already on screen is the one the user is looking at.
-if let bundleID = Bundle.main.bundleIdentifier {
+// The self-test is short-lived and exits on its own, so it is allowed alongside a running copy —
+// otherwise it could never be run against an installed, LaunchAgent-managed instance.
+if ProcessInfo.processInfo.environment["WIDGET_SELF_TEST"] != "1",
+   let bundleID = Bundle.main.bundleIdentifier {
     let others = NSRunningApplication
         .runningApplications(withBundleIdentifier: bundleID)
         .filter { $0 != .current }

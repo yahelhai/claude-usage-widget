@@ -42,6 +42,10 @@ final class RowsView: NSView {
         switch status {
         case .signedOut:
             drawMessage("Claude Code is signed out", command: "claude auth login")
+        case .tokenExpired:
+            // Reached only when automatic renewal failed; the session is still valid, so signing
+            // in again would be the wrong advice.
+            drawMessage("Token expired, renewing…", command: "claude mcp list")
         case .denied:
             drawMessage("Keychain access denied", command: nil,
                         hint: "Allow access to \(Self.keychainLabel), then refresh")
@@ -146,7 +150,7 @@ final class RowsView: NSView {
         case .rateLimited:
             let stamp = lastUpdate.map { " · " + Self.clockFormatter.string(from: $0) } ?? ""
             text = "Rate limited, backing off\(stamp)"
-        case .signedOut, .denied:
+        case .signedOut, .tokenExpired, .denied:
             text = ""
         }
         guard !text.isEmpty else { return }
