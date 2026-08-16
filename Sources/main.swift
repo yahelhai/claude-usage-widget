@@ -91,7 +91,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             print("SELFTEST accepts_first_mouse=\(view.acceptsFirstMouse(for: nil))")
             print("SELFTEST claude_cli_found=\(fetcher.canRenewToken)")
             fflush(stdout)
-            NSApp.terminate(nil)
+            runRenewalTests()   // terminates once the renewal chain settles
         }
     }
 
@@ -173,6 +173,56 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
+
+    // MARK: Renewal tests
+
+    /// Checks the expiry/sign-out classification against synthetic credentials, then drives the
+    /// real renewal chain by forcing one read to report a stale token. The classification half is
+    /// where the "signed out" bug lived; the chain half proves the recovery actually wires up.
+    private func runRenewalTests() {
+        func credential(accessToken: String, expiresAt: Double?) -> Data {
+            var oauth: [String: Any] = ["accessToken": accessToken]
+            if let expiresAt { oauth["expiresAt"] = expiresAt }
+            return try! JSONSerialization.data(withJSONObject: ["claudeAiOauth": oauth])
+        }
+        func name(_ r: Result<String, UsageFetcher.Status>) -> String {
+            switch r {
+            case .success: return "ok"
+            case .failure(let s): return "\(s)"
+            }
+        }
+
+        let nowMs = Date().timeIntervalSince1970 * 1000
+        let cases: [(String, Data, String)] = [
+            ("stale_token_is_expired_not_signedout",
+             credential(accessToken: "tok", expiresAt: nowMs - 3_600_000), "tokenExpired"),
+            ("fresh_token_is_ok",
+             credential(accessToken: "tok", expiresAt: nowMs + 3_600_000), "ok"),
+            ("zero_expiry_is_signedout",
+             credential(accessToken: "tok", expiresAt: 0), "signedOut"),
+            ("empty_token_is_signedout",
+             credential(accessToken: "", expiresAt: nowMs + 3_600_000), "signedOut"),
+            ("garbage_is_signedout", Data("not json".utf8), "signedOut"),
+        ]
+        for (label, data, expected) in cases {
+            let got = name(UsageFetcher.classify(credentialJSON: data))
+            print("SELFTEST \(label)=\(got == expected ? "PASS" : "FAIL(got \(got))")")
+        }
+
+        // Live chain: force a stale read, then let it renew and re-read the real Keychain.
+        fetcher.forceNextReadExpired = true
+        var seen: [String] = []
+        fetcher.onStatus = { seen.append("\($0)") }
+        fetcher.onData = { rows in seen.append("data(\(rows.count) rows)") }
+        fetcher.pollNow()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25) {
+            print("SELFTEST renewal_chain=\(seen.isEmpty ? "no outcome" : seen.joined(separator: ","))")
+            print("SELFTEST renewal_recovered=\(seen.contains { $0.contains("data(") })")
+            fflush(stdout)
+            NSApp.terminate(nil)
+        }
+    }
 
     // MARK: Mock data (WIDGET_MOCK=1)
 

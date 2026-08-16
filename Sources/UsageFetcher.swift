@@ -235,6 +235,10 @@ final class UsageFetcher {
     /// Returns the access token, or the status explaining why there isn't one. The failure modes
     /// used to collapse into `nil`, which is what made the UI unable to say anything useful.
     private func readAccessToken() -> Result<String, Status> {
+        if forceNextReadExpired {
+            forceNextReadExpired = false
+            return .failure(.tokenExpired)
+        }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
         proc.arguments = ["find-generic-password", "-w", "-s", keychainService]
@@ -250,6 +254,13 @@ final class UsageFetcher {
             return .failure(proc.terminationStatus == 44 ? .signedOut : .denied)
         }
 
+        return Self.classify(credentialJSON: data)
+    }
+
+    /// Decides what a stored credential means. Split out from the Keychain read so it can be
+    /// exercised against synthetic input — the expiry/sign-out distinction is exactly where this
+    /// got it wrong before, and that bug was invisible until a token actually went stale.
+    static func classify(credentialJSON data: Data, now: Date = Date()) -> Result<String, Status> {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let oauth = obj["claudeAiOauth"] as? [String: Any],
               let token = oauth["accessToken"] as? String, !token.isEmpty
@@ -262,10 +273,14 @@ final class UsageFetcher {
         if let expMs = oauth["expiresAt"] as? Double {
             let expSec = expMs > 1e12 ? expMs / 1000 : expMs
             if expSec <= 0 { return .failure(.signedOut) }
-            if Date().timeIntervalSince1970 >= expSec { return .failure(.tokenExpired) }
+            if now.timeIntervalSince1970 >= expSec { return .failure(.tokenExpired) }
         }
         return .success(token)
     }
+
+    /// Testing seam: makes the next Keychain read report a stale token, so the renewal path can be
+    /// exercised without waiting hours for a real expiry.
+    var forceNextReadExpired = false
 
     // MARK: - API
 
