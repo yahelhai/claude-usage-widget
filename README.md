@@ -99,19 +99,6 @@ WIDGET_MOCK=1 WIDGET_ALWAYS_SHOW=1 ./build/ClaudeUsageWidget.app/Contents/MacOS/
 `build/probe` is a standalone tool for debugging the visibility engine (`probe --dump`, or
 `probe [seconds]` to watch the verdict change).
 
-## Optional fallback: the in-process exporter (`patch/`)
-
-`patch/` contains an earlier, **superseded** approach: a JavaScript exporter injected into Claude
-Desktop's main process by `patch/patch.sh`, which pushes usage to the widget over a loopback socket.
-It is kept as a reference/fallback for setups where reading the Keychain isn't desirable. The
-default build does not use it, and patching Claude Desktop invalidates Anthropic's code signature
-and is wiped by Claude updates.
-
-The patch mechanics are derived from
-[`toboly/claude-desktop-rtl-patch-mac`](https://github.com/toboly/claude-desktop-rtl-patch-mac),
-itself based on the original patch by **shraga100**. Their license is preserved. This project is
-**not** a fork of that repository.
-
 ## License
 
 MIT — see [LICENSE](LICENSE).
